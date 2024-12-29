@@ -1,1 +1,6 @@
-local suskey = "zlhUni6ljtzrgnUQcFpBIoOGOvYli34ASoyYx4ledmN6l3bVjA5UmUBzwoCH"
+local le = le or "not loaded"
+function rap(key)
+  print(key)
+  return(key)
+end
+rap(le)
