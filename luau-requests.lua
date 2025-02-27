@@ -1,82 +1,40 @@
--- HTTP Module by Patrick Dill
--- based on Python Requests (python-requests.org)
-
-local Lib = script.lib
-local Src = script.src
-
-------------------------------------------
-
-local html = require(Lib.html)
-
-local Request = require(Src.request)
-local Session = require(Src.session)
-local Forms = require(Src.form)
-local RateLimiter = require(Src.ratelimit)
-
-------------------------------------------
-
-local http = {}
-
-http.VERSION = "0.3.0"
-
-http.Request = Request.new
-http.Session = Session.new
-
-http.FormData = Forms.FormData.new
-http.File = Forms.File.new
-
-function http.send(method, url, opts)
-	-- quick method to send http requests
-	--  method: (str) HTTP Method
-	--     url: (str) Fully qualified URL
-	-- options (dictionary):
-		-- headers: (dictionary) Headers to send with request
-		--   query: (dictionary) Query string parameters
-		--    data: (str | dictionary) Data to send in POST or PATCH request
-		--     log: (bool) Whether to log the request
-		-- cookies: (CookieJar | dict) Cookies to use in request
-
-	opts = opts or {}
-
-	local req = Request.new(method, url, opts)
-	return req:send()
+if not game:IsLoaded() then
+    print("nl")
+    game.Loaded:Wait()
 end
 
-function http.promise_send(method, url, opts)
-	-- same as http.send but returns a Promise
-	-- rejects with a table that includes response if response was sent
+local GuiService = game:GetService("StarterGui")
+local TeleService = game:GetService("TeleportService")
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local localserverjobid = game.JobId
 
-	opts = opts or {}
-
-	local req = Request.new(method, url, opts)
-	return req:send(true)
+local scyllajobid = readfile("eba.txt")
+function tptojobid(jobid)
+    TeleService:TeleportToPlaceInstance(game.PlaceId,jobid,Players.LocalPlayer)
+    if CoreGui.RobloxPromptGui.promptOverlay:WaitForChild("ErrorPrompt") then
+       if CoreGui.RobloxPromptGui.promptOverlay.ErrorPrompt.MessageArea.ErrorFrame.ButtonArea:FindFirstChild("OkButton") then
+           game:GetService("GuiService"):ClearError()
+           GuiService:SetCore("SendNotification", {Title = "Information",Text = "Error, Invalid Job ID";})
+           task.wait(5)
+       else
+           GuiService:SetCore("SendNotification", {Title = "Information",Text = "Successful, Joining Server";})  
+       end
+    end
 end
 
--- create quick functions for each http method
-for _, method in pairs({"GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE", "PATCH"}) do
-	http[method:lower()] = function(url, opts)
-		return http.send(method, url, opts)
-	end
-
-	http["promise_" .. method:lower()] = function(url, opts)
-		return http.promise_send(method, url, opts)
-	end
+function handlescylla()
+    local WorldEvent = game.Workspace.zones.fishing:FindFirstChild("Forsaken Veil - Scylla")
+    --if scyllajobid == localserverjobid then task.wait(10000) return end
+    if not WorldEvent then 
+        tptojobid(scyllajobid)
+    else 
+        print("alr")
+        return
+    end
 end
 
-function http.set_ratelimit(requests, period)
-	-- sets rate limit settings
-	local rl = RateLimiter.get("http", requests, period)
-
-	print("[http] RateLimiter settings changed: ", rl.rate, "reqs /", rl.window_size, "secs")
+while wait(5) do
+    print(scyllajobid)
+    handlescylla()
 end
-
-function http.parse_html(html_string, page_url)
-	return html.parse(html_string, 100000, page_url)
-end
-
-http.parse_xml = http.parse_html
-
-http.stats = require(Src.stats)
-
-
-return http
