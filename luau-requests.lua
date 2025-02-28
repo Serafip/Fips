@@ -35,6 +35,7 @@ function handlescylla()
 end
 
 while wait(5) do
+    if scyllajobid == "e" then print("Error occured") return end
     print(scyllajobid)
     handlescylla()
 end
