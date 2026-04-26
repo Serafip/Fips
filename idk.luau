@@ -5,7 +5,208 @@ local ImportGlobals
 
 -- Holds direct closure data (defining this before the DOM tree for line debugging etc)
 local ClosureBindings = {
-    [4] = function()local wax,script,require=ImportGlobals(4)local ImportGlobals return (function(...)return { 
+    [4] = function()local wax,script,require=ImportGlobals(4)local ImportGlobals return (function(...)local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local App = {}
+
+function App.Start(Library)
+    local player = Players.LocalPlayer
+    
+    -- framework access
+    local Framework = require(ReplicatedStorage:WaitForChild("MultiboxFramework"))
+    while not Framework.Loaded do
+        RunService.Heartbeat:Wait()
+    end
+
+    local Inventory = Framework.Inventory
+    local CopyDataKeys = Inventory.CopyDataKeys
+    local MarketplaceReplica = Framework:WaitForModule("Replicate"):WaitForReplica("Marketplace_Listings")
+    local Network = Framework:WaitForModule("Network")
+    local Rarities = Framework.SharedSettings.Rarities
+
+    -- State
+    local activeRarities = {}
+    for name in pairs(Rarities) do activeRarities[name] = true end
+    local sniperTargets = {}
+    local sniperRunning = false
+    local sniperInterval = 5
+
+    local Window = Library:Window({
+        Title = "Market Monitor & Sniper",
+        SubTitle = "Bundled Edition",
+        TabWidth = 160,
+        Size = UDim2.fromOffset(580, 460),
+        Acrylic = true,
+        Theme = "Dark",
+        MinimizeKey = Enum.KeyCode.LeftControl
+    })
+
+    local Tabs = {
+        Market = Window:AddTab({ Title = "Market", Icon = "shopping-cart" }),
+        Sniper = Window:AddTab({ Title = "Sniper", Icon = "target" }),
+        Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
+    }
+
+    -- Market Tab
+    Tabs.Market:AddItems("RarityFilter", {
+        Title = "Rarity Filter",
+        Description = "Select rarities to monitor",
+        Default = (function()
+            local t = {}
+            for name in pairs(Rarities) do
+                table.insert(t, { Name = name, Active = true })
+            end
+            return t
+        end)(),
+        OnItemClicked = function(item)
+            item.Active = not item.Active
+            activeRarities[item.Name] = item.Active
+        end
+    })
+
+    -- Sniper Tab
+    local TargetsList = Tabs.Sniper:AddItems("SniperTargets", {
+        Title = "Active Targets",
+        Description = "List of units to auto-buy",
+        Default = {},
+        OnItemRemoved = function(item, index)
+            table.remove(sniperTargets, index)
+        end
+    })
+
+    local SniperRunToggle = Tabs.Sniper:AddToggle("SniperToggle", {
+        Title = "Enable Sniper",
+        Default = false,
+        Callback = function(Value)
+            sniperRunning = Value
+            if sniperRunning then
+                task.spawn(function()
+                    while sniperRunning do
+                        local listings = MarketplaceReplica:GetData()
+                        if listings then
+                            for _, target in ipairs(sniperTargets) do
+                                for _, listing in pairs(listings) do
+                                    if listing.ItemId == target.itemId and listing.Category == target.category then
+                                        if listing.GemPrice <= target.maxPrice then
+                                            local isShiny = listing.Data and listing.Data[CopyDataKeys.Shiney] or false
+                                            local match = false
+                                            if target.shinyMode == "All" then match = true
+                                            elseif target.shinyMode == "Only Shiny" and isShiny then match = true
+                                            elseif target.shinyMode == "No Shiny" and not isShiny then match = true
+                                            end
+                                            
+                                            if match then
+                                                Network.Invoke("Marketplace_PurchaseListing", listing.UID, listing.GemPrice)
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        task.wait(sniperInterval)
+                    end
+                end)
+            end
+        end
+    })
+
+    Tabs.Sniper:AddSlider("SniperInterval", {
+        Title = "Check Interval",
+        Default = 5,
+        Min = 1,
+        Max = 60,
+        Rounding = 0,
+        Callback = function(Value)
+            sniperInterval = Value
+        end
+    })
+
+    local AddSection = Tabs.Sniper:AddSection("Add New Target")
+    AddSection:Collapse()
+
+    local targetItemDropdown = AddSection:AddDropdown("TargetItem", {
+        Title = "Select Unit",
+        Values = (function()
+            local list = {}
+            for cat in pairs({ Troops = true, Crates = true }) do
+                local items = Inventory.GetAllItems({ cat })
+                for id, config in pairs(items) do
+                    table.insert(list, config.DisplayName or id)
+                end
+            end
+            table.sort(list)
+            return list
+        end)(),
+    })
+
+    local targetMaxPrice = AddSection:AddInput("MaxPrice", {
+        Title = "Max Price (Gems)",
+        Default = "1000",
+        Numeric = true,
+    })
+
+    local targetShinyMode = AddSection:AddDropdown("ShinyMode", {
+        Title = "Shiny Mode",
+        Values = { "All", "Only Shiny", "No Shiny" },
+        Default = "All",
+    })
+
+    AddSection:AddButton({
+        Title = "Confirm Add",
+        Callback = function()
+            local name = targetItemDropdown.Value
+            local price = tonumber(targetMaxPrice.Value) or 0
+            local shiny = targetShinyMode.Value
+            if name and price > 0 then
+                local itemData = nil
+                for cat in pairs({ Troops = true, Crates = true }) do
+                    local items = Inventory.GetAllItems({ cat })
+                    for id, config in pairs(items) do
+                        if (config.DisplayName or id) == name then
+                            itemData = { id = id, category = cat, config = config }
+                            break
+                        end
+                    end
+                    if itemData then break end
+                end
+                if itemData then
+                    local target = {
+                        itemId = itemData.id,
+                        category = itemData.category,
+                        maxPrice = price,
+                        shinyMode = shiny,
+                        Name = name .. " (≤" .. price .. ")",
+                        Icon = itemData.config.Icon or "rbxassetid://0"
+                    }
+                    table.insert(sniperTargets, target)
+                    TargetsList:AddItem(target)
+                end
+            end
+        end
+    })
+
+    -- Settings
+    Tabs.Settings:AddButton({
+        Title = "Unload Script",
+        Callback = function()
+            Library:Destroy()
+            sniperRunning = false
+        end
+    })
+
+    Library:Notify({
+        Title = "Bundled Script",
+        Content = "Auto-Buy Sniper is ready.",
+        Duration = 5
+    })
+end
+
+return App
+
+end)() end,
+    [6] = function()local wax,script,require=ImportGlobals(6)local ImportGlobals return (function(...)return { 
 	Close = "rbxassetid://9886659671",
 	Min = "rbxassetid://9886659276",
 	Max = "rbxassetid://9886659406",
@@ -13,7 +214,7 @@ local ClosureBindings = {
 }
 
 end)() end,
-    [5] = function()local wax,script,require=ImportGlobals(5)local ImportGlobals return (function(...)local Root = script.Parent.Parent
+    [7] = function()local wax,script,require=ImportGlobals(7)local ImportGlobals return (function(...)local Root = script.Parent.Parent
 local Flipper = require(Root.Packages.Flipper)
 local Creator = require(Root.Modules.Creator)
 local New = Creator.New
@@ -92,7 +293,7 @@ return function(Theme, Parent, DialogCheck)
 end
 
 end)() end,
-    [6] = function()local wax,script,require=ImportGlobals(6)local ImportGlobals return (function(...)local Root = script.Parent.Parent
+    [8] = function()local wax,script,require=ImportGlobals(8)local ImportGlobals return (function(...)local Root = script.Parent.Parent
 local Creator = require(Root.Modules.Creator)
 local Button_Component = require(Root.Components.Button)
 local Signal = require(Root.Packages.Signal)
@@ -260,7 +461,7 @@ end
 return Dialog
 
 end)() end,
-    [7] = function()local wax,script,require=ImportGlobals(7)local ImportGlobals return (function(...)local Root = script.Parent.Parent
+    [9] = function()local wax,script,require=ImportGlobals(9)local ImportGlobals return (function(...)local Root = script.Parent.Parent
 local Creator = require(Root.Modules.Creator)
 local New = Creator.New
 
@@ -409,7 +610,7 @@ return function(Title, Desc, Parent, Hover, Config)
 end
 
 end)() end,
-    [8] = function()local wax,script,require=ImportGlobals(8)local ImportGlobals return (function(...)local Root = script.Parent.Parent
+    [10] = function()local wax,script,require=ImportGlobals(10)local ImportGlobals return (function(...)local Root = script.Parent.Parent
 
 local Flipper = require(Root.Packages.Flipper)
 local Creator = require(Root.Modules.Creator)
@@ -631,7 +832,7 @@ end
 return Notification
 
 end)() end,
-    [9] = function()local wax,script,require=ImportGlobals(9)local ImportGlobals return (function(...)local Root = script.Parent.Parent
+    [11] = function()local wax,script,require=ImportGlobals(11)local ImportGlobals return (function(...)local Root = script.Parent.Parent
 local Creator = require(Root.Modules.Creator)
 
 local New = Creator.New
@@ -685,7 +886,7 @@ return function(Title, Parent)
 end
 
 end)() end,
-    [10] = function()local wax,script,require=ImportGlobals(10)local ImportGlobals return (function(...)local Root = script.Parent.Parent
+    [12] = function()local wax,script,require=ImportGlobals(12)local ImportGlobals return (function(...)local Root = script.Parent.Parent
 local Flipper = require(Root.Packages.Flipper)
 local Creator = require(Root.Modules.Creator)
 
@@ -900,7 +1101,7 @@ end
 return TabModule
 
 end)() end,
-    [11] = function()local wax,script,require=ImportGlobals(11)local ImportGlobals return (function(...)local TextService = game:GetService("TextService")
+    [13] = function()local wax,script,require=ImportGlobals(13)local ImportGlobals return (function(...)local TextService = game:GetService("TextService")
 local Root = script.Parent.Parent
 local Flipper = require(Root.Packages.Flipper)
 local Creator = require(Root.Modules.Creator)
@@ -1023,7 +1224,7 @@ return function(Parent, Acrylic)
 end
 
 end)() end,
-    [12] = function()local wax,script,require=ImportGlobals(12)local ImportGlobals return (function(...)local Root = script.Parent.Parent
+    [14] = function()local wax,script,require=ImportGlobals(14)local ImportGlobals return (function(...)local Root = script.Parent.Parent
 local Creator = require(Root.Modules.Creator)
 
 local New = Creator.New
@@ -1265,7 +1466,7 @@ return function(Config)
 end
 
 end)() end,
-    [13] = function()local wax,script,require=ImportGlobals(13)local ImportGlobals return (function(...)-- a wise man once said: "i will rewrite this someday"
+    [15] = function()local wax,script,require=ImportGlobals(15)local ImportGlobals return (function(...)-- a wise man once said: "i will rewrite this someday"
 
 local Root = script.Parent.Parent
 local Flipper = require(Root.Packages.Flipper)
@@ -1768,7 +1969,7 @@ return function(Config)
 end
 
 end)() end,
-    [15] = function()local wax,script,require=ImportGlobals(15)local ImportGlobals return (function(...)local Root = script.Parent.Parent
+    [17] = function()local wax,script,require=ImportGlobals(17)local ImportGlobals return (function(...)local Root = script.Parent.Parent
 local Creator = require(Root.Modules.Creator)
  
 local New = Creator.New
@@ -1811,7 +2012,7 @@ end
 return Element
 
 end)() end,
-    [16] = function()local wax,script,require=ImportGlobals(16)local ImportGlobals return (function(...)local Players = game:GetService("Players")
+    [18] = function()local wax,script,require=ImportGlobals(18)local ImportGlobals return (function(...)local Players = game:GetService("Players")
 
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
@@ -2388,7 +2589,7 @@ end
 
 return Element
 end)() end,
-    [17] = function()local wax,script,require=ImportGlobals(17)local ImportGlobals return (function(...)local UserInputService = game:GetService("UserInputService")
+    [19] = function()local wax,script,require=ImportGlobals(19)local ImportGlobals return (function(...)local UserInputService = game:GetService("UserInputService")
 local Mouse = game:GetService("Players").LocalPlayer:GetMouse()
 local Camera = game:GetService("Workspace").CurrentCamera
 
@@ -2983,7 +3184,7 @@ end
 return Element
 
 end)() end,
-    [18] = function()local wax,script,require=ImportGlobals(18)local ImportGlobals return (function(...)local Elements = {}
+    [20] = function()local wax,script,require=ImportGlobals(20)local ImportGlobals return (function(...)local Elements = {}
 
 for _, Element in next, script:GetChildren() do
 	Elements[#Elements + 1] = require(Element)
@@ -2992,7 +3193,7 @@ end
 return Elements
 
 end)() end,
-    [19] = function()local wax,script,require=ImportGlobals(19)local ImportGlobals return (function(...)local Root = script.Parent.Parent
+    [21] = function()local wax,script,require=ImportGlobals(21)local ImportGlobals return (function(...)local Root = script.Parent.Parent
 local Creator = require(Root.Modules.Creator)
 
 local AddSignal = Creator.AddSignal
@@ -3097,7 +3298,7 @@ end
 return Element
 
 end)() end,
-    [20] = function()local wax,script,require=ImportGlobals(20)local ImportGlobals return (function(...)local UserInputService = game:GetService("UserInputService")
+    [22] = function()local wax,script,require=ImportGlobals(22)local ImportGlobals return (function(...)local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 
 local Root = script.Parent.Parent
@@ -3490,7 +3691,7 @@ end
 return Element
 
 end)() end,
-    [21] = function()local wax,script,require=ImportGlobals(21)local ImportGlobals return (function(...)local UserInputService = game:GetService("UserInputService")
+    [23] = function()local wax,script,require=ImportGlobals(23)local ImportGlobals return (function(...)local UserInputService = game:GetService("UserInputService")
 
 local Root = script.Parent.Parent
 local Creator = require(Root.Modules.Creator)
@@ -3715,7 +3916,7 @@ end
 return Element
 
 end)() end,
-    [22] = function()local wax,script,require=ImportGlobals(22)local ImportGlobals return (function(...)local Root = script.Parent.Parent
+    [24] = function()local wax,script,require=ImportGlobals(24)local ImportGlobals return (function(...)local Root = script.Parent.Parent
 local Components = Root.Components
 
 local Element = {}
@@ -3793,7 +3994,7 @@ end
 return Element
 
 end)() end,
-    [23] = function()local wax,script,require=ImportGlobals(23)local ImportGlobals return (function(...)local UserInputService = game:GetService("UserInputService")
+    [25] = function()local wax,script,require=ImportGlobals(25)local ImportGlobals return (function(...)local UserInputService = game:GetService("UserInputService")
 local Root = script.Parent.Parent
 local Creator = require(Root.Modules.Creator)
 
@@ -3975,7 +4176,7 @@ end
 return Element
 
 end)() end,
-    [24] = function()local wax,script,require=ImportGlobals(24)local ImportGlobals return (function(...)local TweenService, UserInputService = game:GetService("TweenService"), game:GetService("UserInputService")
+    [26] = function()local wax,script,require=ImportGlobals(26)local ImportGlobals return (function(...)local TweenService, UserInputService = game:GetService("TweenService"), game:GetService("UserInputService")
 local Root = script.Parent.Parent
 local Creator = require(Root.Modules.Creator)
  
@@ -4319,7 +4520,7 @@ end
 return Element
 
 end)() end,
-    [25] = function()local wax,script,require=ImportGlobals(25)local ImportGlobals return (function(...)local function Clone<Original>(ToClone: any & Original): (Original, boolean)
+    [27] = function()local wax,script,require=ImportGlobals(27)local ImportGlobals return (function(...)local function Clone<Original>(ToClone: any & Original): (Original, boolean)
 	local Type = typeof(ToClone)
 
 	if Type == "function" and (clonefunc or clonefunction) then
@@ -4476,7 +4677,7 @@ function Library:SafeCallback(Function, ...)
 			local _, i = Event:find(":%d+: ")
 	
 			task.defer(error, debug.traceback(Event, 2))
-	
+
 			Library:Notify({
 				Title = "Interface",
 				Content = "Callback error",
@@ -4742,10 +4943,12 @@ function Library:Notify(Config)
 	return NotificationModule:New(Config)
 end
 
+Library.App = require(Root.App)
+
 return Library
 
 end)() end,
-    [28] = function()local wax,script,require=ImportGlobals(28)local ImportGlobals return (function(...)local Root = script.Parent.Parent.Parent
+    [30] = function()local wax,script,require=ImportGlobals(30)local ImportGlobals return (function(...)local Root = script.Parent.Parent.Parent
 local Creator = require(Root.Modules.Creator)
 local createAcrylic = require(script.Parent.CreateAcrylic)
 local viewportPointToWorld, getOffset = unpack(require(script.Parent.Utils))
@@ -4863,7 +5066,7 @@ return function(distance)
 end
 
 end)() end,
-    [29] = function()local wax,script,require=ImportGlobals(29)local ImportGlobals return (function(...)local Root = script.Parent.Parent.Parent
+    [31] = function()local wax,script,require=ImportGlobals(31)local ImportGlobals return (function(...)local Root = script.Parent.Parent.Parent
 local Creator = require(Root.Modules.Creator)
 local AcrylicBlur = require(script.Parent.AcrylicBlur)
 
@@ -4985,7 +5188,7 @@ return function(props)
 end
 
 end)() end,
-    [30] = function()local wax,script,require=ImportGlobals(30)local ImportGlobals return (function(...)local Root = script.Parent.Parent.Parent
+    [32] = function()local wax,script,require=ImportGlobals(32)local ImportGlobals return (function(...)local Root = script.Parent.Parent.Parent
 local Creator = require(Root.Modules.Creator)
 
 local function createAcrylic()
@@ -5012,7 +5215,7 @@ end
 return createAcrylic
 
 end)() end,
-    [31] = function()local wax,script,require=ImportGlobals(31)local ImportGlobals return (function(...)local Acrylic = {
+    [33] = function()local wax,script,require=ImportGlobals(33)local ImportGlobals return (function(...)local Acrylic = {
 	AcrylicBlur = require(script.AcrylicBlur),
 	CreateAcrylic = require(script.CreateAcrylic),
 	AcrylicPaint = require(script.AcrylicPaint),
@@ -5065,7 +5268,7 @@ end
 return Acrylic
 
 end)() end,
-    [32] = function()local wax,script,require=ImportGlobals(32)local ImportGlobals return (function(...)local function map(value, inMin, inMax, outMin, outMax)
+    [34] = function()local wax,script,require=ImportGlobals(34)local ImportGlobals return (function(...)local function map(value, inMin, inMax, outMin, outMax)
 	return (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin
 end
 
@@ -5082,7 +5285,7 @@ end
 return { viewportPointToWorld, getOffset }
 
 end)() end,
-    [33] = function()local wax,script,require=ImportGlobals(33)local ImportGlobals return (function(...)local Root = script.Parent.Parent
+    [35] = function()local wax,script,require=ImportGlobals(35)local ImportGlobals return (function(...)local Root = script.Parent.Parent
 local Themes = require(Root.Themes)
 local Flipper, Ripple = require(Root.Packages.Flipper), require(Root.Packages.Ripple)
 local Signal = require(Root.Packages.Signal)
@@ -5312,7 +5515,7 @@ end
 return Creator
 
 end)() end,
-    [34] = function()local wax,script,require=ImportGlobals(34)local ImportGlobals return (function(...)local icons_1 = 'rbxassetid://124334518624683'
+    [36] = function()local wax,script,require=ImportGlobals(36)local ImportGlobals return (function(...)local icons_1 = 'rbxassetid://124334518624683'
 local icons_2 = 'rbxassetid://113826256227095'
 local icons_3 = 'rbxassetid://129900432084566'
 local icons_4 = 'rbxassetid://118976126805967'
@@ -58498,7 +58701,7 @@ return {
 	}
 }
 end)() end,
-    [36] = function()local wax,script,require=ImportGlobals(36)local ImportGlobals return (function(...)return {
+    [38] = function()local wax,script,require=ImportGlobals(38)local ImportGlobals return (function(...)return {
     Accent = Color3.fromRGB(102, 136, 204), -- #6688cc
 
     AcrylicMain = Color3.fromRGB(0, 12, 24), -- #000c18
@@ -58545,7 +58748,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [37] = function()local wax,script,require=ImportGlobals(37)local ImportGlobals return (function(...)return {
+    [39] = function()local wax,script,require=ImportGlobals(39)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#ec6a3f"),
 
     AcrylicMain = Color3.fromHex("#31312e"),
@@ -58592,7 +58795,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [38] = function()local wax,script,require=ImportGlobals(38)local ImportGlobals return (function(...)return {
+    [40] = function()local wax,script,require=ImportGlobals(40)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#00BCD4"),
 
     AcrylicMain = Color3.fromHex("#29353b"),
@@ -58639,7 +58842,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [39] = function()local wax,script,require=ImportGlobals(39)local ImportGlobals return (function(...)return {
+    [41] = function()local wax,script,require=ImportGlobals(41)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#b133ff"),
 
     AcrylicMain = Color3.fromHex("#120024"),
@@ -58686,7 +58889,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [40] = function()local wax,script,require=ImportGlobals(40)local ImportGlobals return (function(...)return {
+    [42] = function()local wax,script,require=ImportGlobals(42)local ImportGlobals return (function(...)return {
 	Accent = Color3.fromRGB(97, 62, 167),
 
 	AcrylicMain = Color3.fromRGB(20, 20, 20),
@@ -58734,7 +58937,7 @@ end)() end,
 }
 
 end)() end,
-    [41] = function()local wax,script,require=ImportGlobals(41)local ImportGlobals return (function(...)return {
+    [43] = function()local wax,script,require=ImportGlobals(43)local ImportGlobals return (function(...)return {
 	Accent = Color3.fromRGB(60, 165, 165),
 
 	AcrylicMain = Color3.fromRGB(20, 20, 20),
@@ -58782,7 +58985,7 @@ end)() end,
 }
 
 end)() end,
-    [42] = function()local wax,script,require=ImportGlobals(42)local ImportGlobals return (function(...)return {
+    [44] = function()local wax,script,require=ImportGlobals(44)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#5294e2"),
 
     AcrylicMain = Color3.fromHex("#383c4a"),
@@ -58829,7 +59032,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [43] = function()local wax,script,require=ImportGlobals(43)local ImportGlobals return (function(...)return {
+    [45] = function()local wax,script,require=ImportGlobals(45)local ImportGlobals return (function(...)return {
     Accent = Color3.fromRGB(109, 180, 120),
 
     AcrylicMain = Color3.fromRGB(38, 38, 38),
@@ -58876,7 +59079,7 @@ end)() end,
     HoverChange = 0.04
 }
 end)() end,
-    [44] = function()local wax,script,require=ImportGlobals(44)local ImportGlobals return (function(...)return {
+    [46] = function()local wax,script,require=ImportGlobals(46)local ImportGlobals return (function(...)return {
 	Accent = Color3.fromRGB(96, 205, 255),
 
 	AcrylicMain = Color3.fromRGB(60, 60, 60),
@@ -58924,7 +59127,7 @@ end)() end,
 }
 
 end)() end,
-    [45] = function()local wax,script,require=ImportGlobals(45)local ImportGlobals return (function(...)return {
+    [47] = function()local wax,script,require=ImportGlobals(47)local ImportGlobals return (function(...)return {
 	Accent = Color3.fromRGB(72, 138, 182),
 
 	AcrylicMain = Color3.fromRGB(30, 30, 30),
@@ -58955,7 +59158,7 @@ end)() end,
 }
 
 end)() end,
-    [46] = function()local wax,script,require=ImportGlobals(46)local ImportGlobals return (function(...)return {
+    [48] = function()local wax,script,require=ImportGlobals(48)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#fecb52"),
 
     AcrylicMain = Color3.fromHex("#2c2826"),
@@ -59002,7 +59205,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [47] = function()local wax,script,require=ImportGlobals(47)local ImportGlobals return (function(...)return {
+    [49] = function()local wax,script,require=ImportGlobals(49)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#e7f98b"),
 
     AcrylicMain = Color3.fromHex("#2a2d2a"),
@@ -59049,7 +59252,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [48] = function()local wax,script,require=ImportGlobals(48)local ImportGlobals return (function(...)return {
+    [50] = function()local wax,script,require=ImportGlobals(50)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#34FEBB"),
 
     AcrylicMain = Color3.fromHex("#1D262F"),
@@ -59096,7 +59299,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [49] = function()local wax,script,require=ImportGlobals(49)local ImportGlobals return (function(...)return {
+    [51] = function()local wax,script,require=ImportGlobals(51)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#fec38f"),
 
     AcrylicMain = Color3.fromHex("#2c2734"),
@@ -59143,7 +59346,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [50] = function()local wax,script,require=ImportGlobals(50)local ImportGlobals return (function(...)return {
+    [52] = function()local wax,script,require=ImportGlobals(52)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#fe7734"),
 
     AcrylicMain = Color3.fromHex("#24242e"),
@@ -59190,7 +59393,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [51] = function()local wax,script,require=ImportGlobals(51)local ImportGlobals return (function(...)return {
+    [53] = function()local wax,script,require=ImportGlobals(53)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#cb5226"),
 
     AcrylicMain = Color3.fromHex("#eff0f1"),
@@ -59237,7 +59440,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [52] = function()local wax,script,require=ImportGlobals(52)local ImportGlobals return (function(...)return {
+    [54] = function()local wax,script,require=ImportGlobals(54)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#1f6feb"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#010409"), -- sideBar.background
@@ -59284,7 +59487,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [53] = function()local wax,script,require=ImportGlobals(53)local ImportGlobals return (function(...)return {
+    [55] = function()local wax,script,require=ImportGlobals(55)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#1f6feb"),  -- focusBorder
 
     AcrylicMain = Color3.fromHex("#010409"), -- sideBar.background
@@ -59331,7 +59534,7 @@ end)() end,
     HoverChange = 0.1 
 }
 end)() end,
-    [54] = function()local wax,script,require=ImportGlobals(54)local ImportGlobals return (function(...)return {
+    [56] = function()local wax,script,require=ImportGlobals(56)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#316dca"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#1c2128"), -- sideBar.background
@@ -59378,7 +59581,7 @@ end)() end,
     HoverChange = 0.1 
 }
 end)() end,
-    [55] = function()local wax,script,require=ImportGlobals(55)local ImportGlobals return (function(...)return {
+    [57] = function()local wax,script,require=ImportGlobals(57)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#409eff"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#010409"), -- sideBar.background
@@ -59427,7 +59630,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [56] = function()local wax,script,require=ImportGlobals(56)local ImportGlobals return (function(...)return {
+    [58] = function()local wax,script,require=ImportGlobals(58)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#005cc5"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#1f2428"), -- sideBar.background
@@ -59474,7 +59677,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [57] = function()local wax,script,require=ImportGlobals(57)local ImportGlobals return (function(...)return {
+    [59] = function()local wax,script,require=ImportGlobals(59)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#0969da"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#f6f8fa"), -- textBlockQuote.background
@@ -59521,7 +59724,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [58] = function()local wax,script,require=ImportGlobals(58)local ImportGlobals return (function(...)return {
+    [60] = function()local wax,script,require=ImportGlobals(60)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#0969da"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#f6f8fa"), -- sideBar.background
@@ -59569,7 +59772,7 @@ end)() end,
     HoverChange = 0.1  -- A subtle hover effect
 }
 end)() end,
-    [59] = function()local wax,script,require=ImportGlobals(59)local ImportGlobals return (function(...)return {
+    [61] = function()local wax,script,require=ImportGlobals(61)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#0349b4"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#ffffff"), -- sideBar.background
@@ -59616,7 +59819,7 @@ end)() end,
     HoverChange = 0.1 -- Slightly more pronounced hover effect
 }
 end)() end,
-    [60] = function()local wax,script,require=ImportGlobals(60)local ImportGlobals return (function(...)return {
+    [62] = function()local wax,script,require=ImportGlobals(62)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("2188ff"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("f6f8fa"), -- sideBar.background
@@ -59663,7 +59866,7 @@ end)() end,
     HoverChange = 0.1 -- Slightly more pronounced hover effect
 }
 end)() end,
-    [61] = function()local wax,script,require=ImportGlobals(61)local ImportGlobals return (function(...)local Themes = {
+    [63] = function()local wax,script,require=ImportGlobals(63)local ImportGlobals return (function(...)local Themes = {
 	Names = {
 		"Vynixu",
 		"Dark",
@@ -59739,7 +59942,7 @@ end
 return Themes
 
 end)() end,
-    [62] = function()local wax,script,require=ImportGlobals(62)local ImportGlobals return (function(...)return {
+    [64] = function()local wax,script,require=ImportGlobals(64)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#a57a4c"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#221a0f"), -- editor.background
@@ -59786,7 +59989,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [63] = function()local wax,script,require=ImportGlobals(63)local ImportGlobals return (function(...)return {
+    [65] = function()local wax,script,require=ImportGlobals(65)local ImportGlobals return (function(...)return {
 	Accent = Color3.fromRGB(0, 103, 192),
 
 	AcrylicMain = Color3.fromRGB(200, 200, 200),
@@ -59834,7 +60037,7 @@ end)() end,
 }
 
 end)() end,
-    [64] = function()local wax,script,require=ImportGlobals(64)local ImportGlobals return (function(...)return {
+    [66] = function()local wax,script,require=ImportGlobals(66)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#75715E"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#272822"), -- editor.background
@@ -59881,7 +60084,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [65] = function()local wax,script,require=ImportGlobals(65)local ImportGlobals return (function(...)return {
+    [67] = function()local wax,script,require=ImportGlobals(67)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#3655b5"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#1e1e1e"), -- editor.background
@@ -59928,7 +60131,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [66] = function()local wax,script,require=ImportGlobals(66)local ImportGlobals return (function(...)return {
+    [68] = function()local wax,script,require=ImportGlobals(68)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#528bff"), -- activityBarBadge.background
 
     AcrylicMain = Color3.fromHex("#16171D"), -- editor.background
@@ -59975,7 +60178,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [67] = function()local wax,script,require=ImportGlobals(67)local ImportGlobals return (function(...)return {
+    [69] = function()local wax,script,require=ImportGlobals(69)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#F92672"), -- Using the keyword color as accent
 
     AcrylicMain = Color3.fromHex("#272822"), -- editor.background
@@ -60022,7 +60225,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [68] = function()local wax,script,require=ImportGlobals(68)local ImportGlobals return (function(...)return {
+    [70] = function()local wax,script,require=ImportGlobals(70)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#9769dc"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#F5F5F5"), -- editor.background
@@ -60069,7 +60272,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [69] = function()local wax,script,require=ImportGlobals(69)local ImportGlobals return (function(...)return {
+    [71] = function()local wax,script,require=ImportGlobals(71)local ImportGlobals return (function(...)return {
 	Accent = Color3.fromRGB(180, 55, 90),
 
 	AcrylicMain = Color3.fromRGB(40, 40, 40),
@@ -60117,7 +60320,7 @@ end)() end,
 }
 
 end)() end,
-    [70] = function()local wax,script,require=ImportGlobals(70)local ImportGlobals return (function(...)return {
+    [72] = function()local wax,script,require=ImportGlobals(72)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#2AA198"), -- String color as accent
 
     AcrylicMain = Color3.fromHex("#002B36"), -- editor.background
@@ -60164,7 +60367,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [71] = function()local wax,script,require=ImportGlobals(71)local ImportGlobals return (function(...)return {
+    [73] = function()local wax,script,require=ImportGlobals(73)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#b58900"), -- Using the extension button color as accent
 
     AcrylicMain = Color3.fromHex("#FDF6E3"), -- editor.background
@@ -60211,7 +60414,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [72] = function()local wax,script,require=ImportGlobals(72)local ImportGlobals return (function(...)return {
+    [74] = function()local wax,script,require=ImportGlobals(74)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#bbdaff"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#002451"), -- editor.background
@@ -60258,7 +60461,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [73] = function()local wax,script,require=ImportGlobals(73)local ImportGlobals return (function(...)return {
+    [75] = function()local wax,script,require=ImportGlobals(75)local ImportGlobals return (function(...)return {
     Accent = Color3.fromRGB(97, 161, 107),
 
     AcrylicMain = Color3.fromRGB(252, 245, 228),
@@ -60305,101 +60508,101 @@ end)() end,
     HoverChange = 0.04
 }
 end)() end,
-    [74] = function()local wax,script,require=ImportGlobals(74)local ImportGlobals return (function(...)return {
-    Accent = Color3.fromHex("#48b258"),
-
-    AcrylicMain = Color3.fromHex("#1e1e1e"),
-    AcrylicBorder = Color3.fromHex("#444444"),
-    AcrylicGradient = ColorSequence.new(Color3.fromHex("#1e1e1e"), Color3.fromHex("#1e1e1e")),
-    AcrylicNoise = 0.92,
-
-    TitleBarLine = Color3.fromHex("#444444"),
-    Tab = Color3.fromHex("#dddddd"),
-
-    Element = Color3.fromHex("#242424"),
-    ElementBorder = Color3.fromHex("#404040"),
-    InElementBorder = Color3.fromHex("#48b258"),
-    ElementTransparency = 0,
-
-    ToggleSlider = Color3.fromHex("#48b258"),
-    ToggleToggled = Color3.fromHex("#1e1e1e"),
-
-    SliderRail = Color3.fromHex("#48b258"),
-
-    DropdownFrame = Color3.fromHex("#242424"),
-    DropdownHolder = Color3.fromHex("#242424"),
-    DropdownBorder = Color3.fromHex("#404040"),
-    DropdownOption = Color3.fromHex("#dddddd"),
-
-    Keybind = Color3.fromHex("#242424"),
-
-    Input = Color3.fromHex("#242424"),
-    InputFocused = Color3.fromHex("#242424"),
-    InputIndicator = Color3.fromHex("#808080"),
-
-    Dialog = Color3.fromHex("#242424"),
-    DialogHolder = Color3.fromHex("#1e1e1e"),
-    DialogHolderLine = Color3.fromHex("#404040"),
-    DialogButton = Color3.fromHex("#242424"),
-    DialogButtonBorder = Color3.fromHex("#404040"),
-    DialogBorder = Color3.fromHex("#444444"),
-    DialogInput = Color3.fromHex("#242424"),
-    DialogInputLine = Color3.fromHex("#48b258"),
-
-    Text = Color3.fromHex("#dddddd"),
-    SubText = Color3.fromHex("#808080"),
-    Hover = Color3.fromHex("#2A2D2E"),
-    HoverChange = 0.05
-}
-end)() end,
-    [75] = function()local wax,script,require=ImportGlobals(75)local ImportGlobals return (function(...)return {
-    Accent = Color3.fromHex("#48b258"),
-
-    AcrylicMain = Color3.fromHex("#1e1e1e"),
-    AcrylicBorder = Color3.fromHex("#444444"),
-    AcrylicGradient = ColorSequence.new(Color3.fromHex("#1e1e1e"), Color3.fromHex("#1e1e1e")),
-    AcrylicNoise = 0.92,
-
-    TitleBarLine = Color3.fromHex("#444444"),
-    Tab = Color3.fromHex("#dddddd"),
-
-    Element = Color3.fromHex("#242424"),
-    ElementBorder = Color3.fromHex("#404040"),
-    InElementBorder = Color3.fromHex("#48b258"),
-    ElementTransparency = 0,
-
-    ToggleSlider = Color3.fromHex("#48b258"),
-    ToggleToggled = Color3.fromHex("#1e1e1e"),
-
-    SliderRail = Color3.fromHex("#48b258"),
-
-    DropdownFrame = Color3.fromHex("#242424"),
-    DropdownHolder = Color3.fromHex("#242424"),
-    DropdownBorder = Color3.fromHex("#404040"),
-    DropdownOption = Color3.fromHex("#dddddd"),
-
-    Keybind = Color3.fromHex("#242424"),
-
-    Input = Color3.fromHex("#242424"),
-    InputFocused = Color3.fromHex("#242424"),
-    InputIndicator = Color3.fromHex("#808080"),
-
-    Dialog = Color3.fromHex("#242424"),
-    DialogHolder = Color3.fromHex("#1e1e1e"),
-    DialogHolderLine = Color3.fromHex("#404040"),
-    DialogButton = Color3.fromHex("#242424"),
-    DialogButtonBorder = Color3.fromHex("#404040"),
-    DialogBorder = Color3.fromHex("#444444"),
-    DialogInput = Color3.fromHex("#242424"),
-    DialogInputLine = Color3.fromHex("#48b258"),
-
-    Text = Color3.fromHex("#dddddd"),
-    SubText = Color3.fromHex("#808080"),
-    Hover = Color3.fromHex("#2A2D2E"),
-    HoverChange = 0.05
-}
-end)() end,
     [76] = function()local wax,script,require=ImportGlobals(76)local ImportGlobals return (function(...)return {
+    Accent = Color3.fromHex("#48b258"),
+
+    AcrylicMain = Color3.fromHex("#1e1e1e"),
+    AcrylicBorder = Color3.fromHex("#444444"),
+    AcrylicGradient = ColorSequence.new(Color3.fromHex("#1e1e1e"), Color3.fromHex("#1e1e1e")),
+    AcrylicNoise = 0.92,
+
+    TitleBarLine = Color3.fromHex("#444444"),
+    Tab = Color3.fromHex("#dddddd"),
+
+    Element = Color3.fromHex("#242424"),
+    ElementBorder = Color3.fromHex("#404040"),
+    InElementBorder = Color3.fromHex("#48b258"),
+    ElementTransparency = 0,
+
+    ToggleSlider = Color3.fromHex("#48b258"),
+    ToggleToggled = Color3.fromHex("#1e1e1e"),
+
+    SliderRail = Color3.fromHex("#48b258"),
+
+    DropdownFrame = Color3.fromHex("#242424"),
+    DropdownHolder = Color3.fromHex("#242424"),
+    DropdownBorder = Color3.fromHex("#404040"),
+    DropdownOption = Color3.fromHex("#dddddd"),
+
+    Keybind = Color3.fromHex("#242424"),
+
+    Input = Color3.fromHex("#242424"),
+    InputFocused = Color3.fromHex("#242424"),
+    InputIndicator = Color3.fromHex("#808080"),
+
+    Dialog = Color3.fromHex("#242424"),
+    DialogHolder = Color3.fromHex("#1e1e1e"),
+    DialogHolderLine = Color3.fromHex("#404040"),
+    DialogButton = Color3.fromHex("#242424"),
+    DialogButtonBorder = Color3.fromHex("#404040"),
+    DialogBorder = Color3.fromHex("#444444"),
+    DialogInput = Color3.fromHex("#242424"),
+    DialogInputLine = Color3.fromHex("#48b258"),
+
+    Text = Color3.fromHex("#dddddd"),
+    SubText = Color3.fromHex("#808080"),
+    Hover = Color3.fromHex("#2A2D2E"),
+    HoverChange = 0.05
+}
+end)() end,
+    [77] = function()local wax,script,require=ImportGlobals(77)local ImportGlobals return (function(...)return {
+    Accent = Color3.fromHex("#48b258"),
+
+    AcrylicMain = Color3.fromHex("#1e1e1e"),
+    AcrylicBorder = Color3.fromHex("#444444"),
+    AcrylicGradient = ColorSequence.new(Color3.fromHex("#1e1e1e"), Color3.fromHex("#1e1e1e")),
+    AcrylicNoise = 0.92,
+
+    TitleBarLine = Color3.fromHex("#444444"),
+    Tab = Color3.fromHex("#dddddd"),
+
+    Element = Color3.fromHex("#242424"),
+    ElementBorder = Color3.fromHex("#404040"),
+    InElementBorder = Color3.fromHex("#48b258"),
+    ElementTransparency = 0,
+
+    ToggleSlider = Color3.fromHex("#48b258"),
+    ToggleToggled = Color3.fromHex("#1e1e1e"),
+
+    SliderRail = Color3.fromHex("#48b258"),
+
+    DropdownFrame = Color3.fromHex("#242424"),
+    DropdownHolder = Color3.fromHex("#242424"),
+    DropdownBorder = Color3.fromHex("#404040"),
+    DropdownOption = Color3.fromHex("#dddddd"),
+
+    Keybind = Color3.fromHex("#242424"),
+
+    Input = Color3.fromHex("#242424"),
+    InputFocused = Color3.fromHex("#242424"),
+    InputIndicator = Color3.fromHex("#808080"),
+
+    Dialog = Color3.fromHex("#242424"),
+    DialogHolder = Color3.fromHex("#1e1e1e"),
+    DialogHolderLine = Color3.fromHex("#404040"),
+    DialogButton = Color3.fromHex("#242424"),
+    DialogButtonBorder = Color3.fromHex("#404040"),
+    DialogBorder = Color3.fromHex("#444444"),
+    DialogInput = Color3.fromHex("#242424"),
+    DialogInputLine = Color3.fromHex("#48b258"),
+
+    Text = Color3.fromHex("#dddddd"),
+    SubText = Color3.fromHex("#808080"),
+    Hover = Color3.fromHex("#2A2D2E"),
+    HoverChange = 0.05
+}
+end)() end,
+    [78] = function()local wax,script,require=ImportGlobals(78)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#7b36e2"),
 
     AcrylicMain = Color3.fromHex("#110e1a"),
@@ -60446,7 +60649,7 @@ end)() end,
     HoverChange = 0.05
 }
 end)() end,
-    [77] = function()local wax,script,require=ImportGlobals(77)local ImportGlobals return (function(...)return {
+    [79] = function()local wax,script,require=ImportGlobals(79)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#7b36e2"),
 
     AcrylicMain = Color3.fromHex("#110e1a"),
@@ -60493,7 +60696,7 @@ end)() end,
     HoverChange = 0.05
 }
 end)() end,
-    [78] = function()local wax,script,require=ImportGlobals(78)local ImportGlobals return (function(...)return {
+    [80] = function()local wax,script,require=ImportGlobals(80)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#165fb3"),
 
     AcrylicMain = Color3.fromHex("#21252b"),
@@ -60540,7 +60743,7 @@ end)() end,
     HoverChange = 0.05
 }
 end)() end,
-    [79] = function()local wax,script,require=ImportGlobals(79)local ImportGlobals return (function(...)return {
+    [81] = function()local wax,script,require=ImportGlobals(81)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#165fb3"),
 
     AcrylicMain = Color3.fromHex("#191c28"),
@@ -60587,7 +60790,7 @@ end)() end,
     HoverChange = 0.05
 }
 end)() end,
-    [80] = function()local wax,script,require=ImportGlobals(80)local ImportGlobals return (function(...)return {
+    [82] = function()local wax,script,require=ImportGlobals(82)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#0f96ff"),
 
     AcrylicMain = Color3.fromHex("#ffffff"),
@@ -60634,7 +60837,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [81] = function()local wax,script,require=ImportGlobals(81)local ImportGlobals return (function(...)return {
+    [83] = function()local wax,script,require=ImportGlobals(83)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#e32b00"),
 
     AcrylicMain = Color3.fromHex("#130c0f"),
@@ -60681,7 +60884,7 @@ end)() end,
     HoverChange = 0.05
 }
 end)() end,
-    [82] = function()local wax,script,require=ImportGlobals(82)local ImportGlobals return (function(...)return {
+    [84] = function()local wax,script,require=ImportGlobals(84)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#1591ff"),
 
     AcrylicMain = Color3.fromHex("#202432"),
@@ -60728,7 +60931,7 @@ end)() end,
     HoverChange = 0.05
 }
 end)() end,
-    [83] = function()local wax,script,require=ImportGlobals(83)local ImportGlobals return (function(...)return {
+    [85] = function()local wax,script,require=ImportGlobals(85)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#007ACC"), -- activityBarBadge.background
 
     AcrylicMain = Color3.fromHex("#1E1E1E"), -- editor.background
@@ -60775,7 +60978,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [84] = function()local wax,script,require=ImportGlobals(84)local ImportGlobals return (function(...)return {
+    [86] = function()local wax,script,require=ImportGlobals(86)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#007ACC"), -- activityBarBadge.background
 
     AcrylicMain = Color3.fromHex("#FFFFFF"), -- editor.background
@@ -60822,7 +61025,7 @@ end)() end,
     HoverChange = 0.1
 } 
 end)() end,
-    [85] = function()local wax,script,require=ImportGlobals(85)local ImportGlobals return (function(...)return {
+    [87] = function()local wax,script,require=ImportGlobals(87)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#569cd6"), -- Based on keyword color
 
     AcrylicMain = Color3.fromHex("#000000"), -- editor.background
@@ -60869,7 +61072,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [86] = function()local wax,script,require=ImportGlobals(86)local ImportGlobals return (function(...)return {
+    [88] = function()local wax,script,require=ImportGlobals(88)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#0078D4"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#181818"), -- activityBar.background
@@ -60916,7 +61119,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [87] = function()local wax,script,require=ImportGlobals(87)local ImportGlobals return (function(...)return {
+    [89] = function()local wax,script,require=ImportGlobals(89)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#DCDCAA"), -- Based on function declarations color
 
     AcrylicMain = Color3.fromHex("#1E1E1E"), -- VS Code's default dark background
@@ -60963,7 +61166,7 @@ end)() end,
     HoverChange = 0.05
 }
 end)() end,
-    [88] = function()local wax,script,require=ImportGlobals(88)local ImportGlobals return (function(...)return {
+    [90] = function()local wax,script,require=ImportGlobals(90)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#5e2cbc"), -- Based on function color
 
     AcrylicMain = Color3.fromHex("#ffffff"), -- Light background
@@ -61010,7 +61213,7 @@ end)() end,
     HoverChange = 0.1
 } 
 end)() end,
-    [89] = function()local wax,script,require=ImportGlobals(89)local ImportGlobals return (function(...)return {
+    [91] = function()local wax,script,require=ImportGlobals(91)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#005FB8"), -- focusBorder
 
     AcrylicMain = Color3.fromHex("#F8F8F8"), -- activityBar.background
@@ -61057,7 +61260,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [90] = function()local wax,script,require=ImportGlobals(90)local ImportGlobals return (function(...)return {
+    [92] = function()local wax,script,require=ImportGlobals(92)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#795E26"), -- Function declarations color
 
     AcrylicMain = Color3.fromHex("#FFFFFF"), -- editor.background
@@ -61104,7 +61307,7 @@ end)() end,
     HoverChange = 0.1
 } 
 end)() end,
-    [91] = function()local wax,script,require=ImportGlobals(91)local ImportGlobals return (function(...)return {
+    [93] = function()local wax,script,require=ImportGlobals(93)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#cc3333"), -- badge.background
 
     AcrylicMain = Color3.fromHex("#580000"), -- activityBar.background
@@ -61151,7 +61354,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [92] = function()local wax,script,require=ImportGlobals(92)local ImportGlobals return (function(...)return {
+    [94] = function()local wax,script,require=ImportGlobals(94)local ImportGlobals return (function(...)return {
 	Accent = Color3.fromRGB(90, 235, 45),
 
 	AcrylicMain = Color3.fromRGB(30, 30, 30),
@@ -61181,7 +61384,7 @@ end)() end,
 	DialogInputLine = Color3.fromRGB(120, 120, 120)
 }
 end)() end,
-    [93] = function()local wax,script,require=ImportGlobals(93)local ImportGlobals return (function(...)return {
+    [95] = function()local wax,script,require=ImportGlobals(95)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#e95420"),
 
     AcrylicMain = Color3.fromHex("#383838"),
@@ -61228,7 +61431,7 @@ end)() end,
     HoverChange = 0.1
 }
 end)() end,
-    [94] = function()local wax,script,require=ImportGlobals(94)local ImportGlobals return (function(...)return {
+    [96] = function()local wax,script,require=ImportGlobals(96)local ImportGlobals return (function(...)return {
     Accent = Color3.fromHex("#e95420"),
 
     AcrylicMain = Color3.fromHex("#edeef0"),
@@ -61294,35 +61497,28 @@ local ObjectTree = {
                 },
                 {
                     {
-                        26,
+                        28,
                         1,
                         {
                             "Modules"
                         },
                         {
                             {
-                                27,
+                                35,
+                                2,
+                                {
+                                    "Creator"
+                                }
+                            },
+                            {
+                                29,
                                 1,
                                 {
                                     "Acrylic"
                                 },
                                 {
                                     {
-                                        29,
-                                        2,
-                                        {
-                                            "AcrylicPaint"
-                                        }
-                                    },
-                                    {
-                                        31,
-                                        2,
-                                        {
-                                            "init"
-                                        }
-                                    },
-                                    {
-                                        28,
+                                        30,
                                         2,
                                         {
                                             "AcrylicBlur"
@@ -61332,27 +61528,34 @@ local ObjectTree = {
                                         32,
                                         2,
                                         {
+                                            "CreateAcrylic"
+                                        }
+                                    },
+                                    {
+                                        31,
+                                        2,
+                                        {
+                                            "AcrylicPaint"
+                                        }
+                                    },
+                                    {
+                                        34,
+                                        2,
+                                        {
                                             "Utils"
                                         }
                                     },
                                     {
-                                        30,
+                                        33,
                                         2,
                                         {
-                                            "CreateAcrylic"
+                                            "init"
                                         }
                                     }
                                 }
                             },
                             {
-                                33,
-                                2,
-                                {
-                                    "Creator"
-                                }
-                            },
-                            {
-                                34,
+                                36,
                                 2,
                                 {
                                     "Icons"
@@ -61361,77 +61564,77 @@ local ObjectTree = {
                         }
                     },
                     {
-                        14,
+                        16,
                         1,
                         {
                             "Elements"
                         },
                         {
                             {
-                                15,
+                                17,
                                 2,
                                 {
                                     "Button"
                                 }
                             },
                             {
-                                18,
-                                2,
-                                {
-                                    "init"
-                                }
-                            },
-                            {
                                 22,
-                                2,
-                                {
-                                    "Paragraph"
-                                }
-                            },
-                            {
-                                16,
-                                2,
-                                {
-                                    "Colorpicker"
-                                }
-                            },
-                            {
-                                20,
                                 2,
                                 {
                                     "Items"
                                 }
                             },
                             {
-                                19,
+                                18,
                                 2,
                                 {
-                                    "Input"
-                                }
-                            },
-                            {
-                                17,
-                                2,
-                                {
-                                    "Dropdown"
-                                }
-                            },
-                            {
-                                23,
-                                2,
-                                {
-                                    "Slider"
+                                    "Colorpicker"
                                 }
                             },
                             {
                                 24,
                                 2,
                                 {
+                                    "Paragraph"
+                                }
+                            },
+                            {
+                                25,
+                                2,
+                                {
+                                    "Slider"
+                                }
+                            },
+                            {
+                                26,
+                                2,
+                                {
                                     "Toggle"
                                 }
                             },
                             {
+                                19,
+                                2,
+                                {
+                                    "Dropdown"
+                                }
+                            },
+                            {
+                                20,
+                                2,
+                                {
+                                    "init"
+                                }
+                            },
+                            {
                                 21,
+                                2,
+                                {
+                                    "Input"
+                                }
+                            },
+                            {
+                                23,
                                 2,
                                 {
                                     "Keybind"
@@ -61440,154 +61643,154 @@ local ObjectTree = {
                         }
                     },
                     {
-                        25,
-                        2,
-                        {
-                            "init"
-                        }
-                    },
-                    {
-                        35,
+                        37,
                         1,
                         {
                             "Themes"
                         },
                         {
                             {
-                                63,
+                                39,
                                 2,
                                 {
-                                    "Light"
+                                    "Adapta Nokto"
                                 }
                             },
                             {
-                                60,
+                                53,
                                 2,
                                 {
-                                    "GitHub Light"
+                                    "Elementary"
                                 }
                             },
                             {
-                                70,
+                                57,
                                 2,
                                 {
-                                    "Solarized Dark"
+                                    "GitHub Dark High Contrast"
                                 }
                             },
                             {
-                                79,
+                                58,
                                 2,
                                 {
-                                    "Viow Flat"
+                                    "GitHub Dark"
                                 }
                             },
                             {
-                                65,
-                                2,
-                                {
-                                    "Monokai Dimmed"
-                                }
-                            },
-                            {
-                                67,
-                                2,
-                                {
-                                    "Monokai"
-                                }
-                            },
-                            {
-                                93,
-                                2,
-                                {
-                                    "Yaru Dark"
-                                }
-                            },
-                            {
-                                77,
-                                2,
-                                {
-                                    "Viow Arabian"
-                                }
-                            },
-                            {
-                                85,
-                                2,
-                                {
-                                    "VSC Dark High Contrast"
-                                }
-                            },
-                            {
-                                92,
-                                2,
-                                {
-                                    "Vynixu"
-                                }
-                            },
-                            {
-                                94,
+                                96,
                                 2,
                                 {
                                     "Yaru"
                                 }
                             },
                             {
-                                39,
+                                81,
                                 2,
                                 {
-                                    "Amethyst Dark"
+                                    "Viow Flat"
                                 }
                             },
                             {
-                                61,
+                                77,
                                 2,
                                 {
-                                    "init"
-                                }
-                            },
-                            {
-                                88,
-                                2,
-                                {
-                                    "VSC Light High Contrast"
-                                }
-                            },
-                            {
-                                89,
-                                2,
-                                {
-                                    "VSC Light Modern"
-                                }
-                            },
-                            {
-                                59,
-                                2,
-                                {
-                                    "GitHub Light High Contrast"
-                                }
-                            },
-                            {
-                                90,
-                                2,
-                                {
-                                    "VSC Light+"
-                                }
-                            },
-                            {
-                                38,
-                                2,
-                                {
-                                    "Ambiance"
+                                    "United Ubuntu"
                                 }
                             },
                             {
                                 52,
                                 2,
                                 {
-                                    "GitHub Dark Colorblind"
+                                    "DuoTone Dark Space"
                                 }
                             },
                             {
-                                69,
+                                49,
+                                2,
+                                {
+                                    "DuoTone Dark Forest"
+                                }
+                            },
+                            {
+                                88,
+                                2,
+                                {
+                                    "VSC Dark Modern"
+                                }
+                            },
+                            {
+                                78,
+                                2,
+                                {
+                                    "Viow Arabian Mix"
+                                }
+                            },
+                            {
+                                92,
+                                2,
+                                {
+                                    "VSC Light+"
+                                }
+                            },
+                            {
+                                51,
+                                2,
+                                {
+                                    "DuoTone Dark Sky"
+                                }
+                            },
+                            {
+                                91,
+                                2,
+                                {
+                                    "VSC Light Modern"
+                                }
+                            },
+                            {
+                                84,
+                                2,
+                                {
+                                    "Viow Neon"
+                                }
+                            },
+                            {
+                                89,
+                                2,
+                                {
+                                    "VSC Dark+"
+                                }
+                            },
+                            {
+                                64,
+                                2,
+                                {
+                                    "Kimbie Dark"
+                                }
+                            },
+                            {
+                                68,
+                                2,
+                                {
+                                    "Monokai Vibrant"
+                                }
+                            },
+                            {
+                                45,
+                                2,
+                                {
+                                    "Dark Typewriter"
+                                }
+                            },
+                            {
+                                94,
+                                2,
+                                {
+                                    "Vynixu"
+                                }
+                            },
+                            {
+                                71,
                                 2,
                                 {
                                     "Rose"
@@ -61597,179 +61800,88 @@ local ObjectTree = {
                                 87,
                                 2,
                                 {
-                                    "VSC Dark+"
-                                }
-                            },
-                            {
-                                45,
-                                2,
-                                {
-                                    "Darker"
-                                }
-                            },
-                            {
-                                86,
-                                2,
-                                {
-                                    "VSC Dark Modern"
+                                    "VSC Dark High Contrast"
                                 }
                             },
                             {
                                 50,
                                 2,
                                 {
-                                    "DuoTone Dark Space"
-                                }
-                            },
-                            {
-                                76,
-                                2,
-                                {
-                                    "Viow Arabian Mix"
-                                }
-                            },
-                            {
-                                84,
-                                2,
-                                {
-                                    "VS Light"
-                                }
-                            },
-                            {
-                                83,
-                                2,
-                                {
-                                    "VS Dark"
-                                }
-                            },
-                            {
-                                64,
-                                2,
-                                {
-                                    "Monokai Classic"
-                                }
-                            },
-                            {
-                                56,
-                                2,
-                                {
-                                    "GitHub Dark"
-                                }
-                            },
-                            {
-                                36,
-                                2,
-                                {
-                                    "Abyss"
-                                }
-                            },
-                            {
-                                81,
-                                2,
-                                {
-                                    "Viow Mars"
-                                }
-                            },
-                            {
-                                74,
-                                2,
-                                {
-                                    "United GNOME"
-                                }
-                            },
-                            {
-                                51,
-                                2,
-                                {
-                                    "Elementary"
+                                    "DuoTone Dark Sea"
                                 }
                             },
                             {
                                 48,
                                 2,
                                 {
-                                    "DuoTone Dark Sea"
+                                    "DuoTone Dark Earth"
                                 }
                             },
                             {
-                                78,
+                                85,
                                 2,
                                 {
-                                    "Viow Darker"
+                                    "VS Dark"
                                 }
                             },
                             {
-                                75,
+                                42,
                                 2,
                                 {
-                                    "United Ubuntu"
+                                    "Amethyst"
                                 }
                             },
                             {
-                                80,
+                                44,
                                 2,
                                 {
-                                    "Viow Light"
+                                    "Arc Dark"
                                 }
                             },
                             {
-                                73,
+                                90,
                                 2,
                                 {
-                                    "Typewriter"
+                                    "VSC Light High Contrast"
                                 }
                             },
                             {
-                                72,
+                                38,
                                 2,
                                 {
-                                    "Tomorrow Night Blue"
+                                    "Abyss"
                                 }
                             },
                             {
-                                53,
+                                47,
                                 2,
                                 {
-                                    "GitHub Dark Default"
+                                    "Darker"
                                 }
                             },
                             {
-                                54,
+                                83,
                                 2,
                                 {
-                                    "GitHub Dark Dimmed"
+                                    "Viow Mars"
                                 }
                             },
                             {
-                                37,
+                                59,
                                 2,
                                 {
-                                    "Adapta Nokto"
+                                    "GitHub Light Colorblind"
                                 }
                             },
                             {
-                                58,
+                                63,
                                 2,
                                 {
-                                    "GitHub Light Default"
+                                    "init"
                                 }
                             },
                             {
-                                71,
-                                2,
-                                {
-                                    "Solarized Light"
-                                }
-                            },
-                            {
-                                49,
-                                2,
-                                {
-                                    "DuoTone Dark Sky"
-                                }
-                            },
-                            {
-                                68,
+                                70,
                                 2,
                                 {
                                     "Quiet Light"
@@ -61779,170 +61891,277 @@ local ObjectTree = {
                                 82,
                                 2,
                                 {
-                                    "Viow Neon"
+                                    "Viow Light"
                                 }
                             },
                             {
-                                91,
+                                95,
                                 2,
                                 {
-                                    "VSC Red"
+                                    "Yaru Dark"
                                 }
                             },
                             {
-                                43,
+                                61,
                                 2,
                                 {
-                                    "Dark Typewriter"
-                                }
-                            },
-                            {
-                                62,
-                                2,
-                                {
-                                    "Kimbie Dark"
-                                }
-                            },
-                            {
-                                47,
-                                2,
-                                {
-                                    "DuoTone Dark Forest"
-                                }
-                            },
-                            {
-                                41,
-                                2,
-                                {
-                                    "Aqua"
-                                }
-                            },
-                            {
-                                44,
-                                2,
-                                {
-                                    "Dark"
-                                }
-                            },
-                            {
-                                40,
-                                2,
-                                {
-                                    "Amethyst"
-                                }
-                            },
-                            {
-                                46,
-                                2,
-                                {
-                                    "DuoTone Dark Earth"
-                                }
-                            },
-                            {
-                                42,
-                                2,
-                                {
-                                    "Arc Dark"
+                                    "GitHub Light High Contrast"
                                 }
                             },
                             {
                                 55,
                                 2,
                                 {
-                                    "GitHub Dark High Contrast"
+                                    "GitHub Dark Default"
+                                }
+                            },
+                            {
+                                93,
+                                2,
+                                {
+                                    "VSC Red"
+                                }
+                            },
+                            {
+                                56,
+                                2,
+                                {
+                                    "GitHub Dark Dimmed"
+                                }
+                            },
+                            {
+                                80,
+                                2,
+                                {
+                                    "Viow Darker"
+                                }
+                            },
+                            {
+                                67,
+                                2,
+                                {
+                                    "Monokai Dimmed"
+                                }
+                            },
+                            {
+                                43,
+                                2,
+                                {
+                                    "Aqua"
+                                }
+                            },
+                            {
+                                73,
+                                2,
+                                {
+                                    "Solarized Light"
+                                }
+                            },
+                            {
+                                74,
+                                2,
+                                {
+                                    "Tomorrow Night Blue"
+                                }
+                            },
+                            {
+                                75,
+                                2,
+                                {
+                                    "Typewriter"
+                                }
+                            },
+                            {
+                                72,
+                                2,
+                                {
+                                    "Solarized Dark"
+                                }
+                            },
+                            {
+                                86,
+                                2,
+                                {
+                                    "VS Light"
+                                }
+                            },
+                            {
+                                69,
+                                2,
+                                {
+                                    "Monokai"
+                                }
+                            },
+                            {
+                                46,
+                                2,
+                                {
+                                    "Dark"
+                                }
+                            },
+                            {
+                                76,
+                                2,
+                                {
+                                    "United GNOME"
+                                }
+                            },
+                            {
+                                40,
+                                2,
+                                {
+                                    "Ambiance"
+                                }
+                            },
+                            {
+                                79,
+                                2,
+                                {
+                                    "Viow Arabian"
                                 }
                             },
                             {
                                 66,
                                 2,
                                 {
-                                    "Monokai Vibrant"
+                                    "Monokai Classic"
                                 }
                             },
                             {
-                                57,
+                                60,
                                 2,
                                 {
-                                    "GitHub Light Colorblind"
+                                    "GitHub Light Default"
+                                }
+                            },
+                            {
+                                41,
+                                2,
+                                {
+                                    "Amethyst Dark"
+                                }
+                            },
+                            {
+                                65,
+                                2,
+                                {
+                                    "Light"
+                                }
+                            },
+                            {
+                                62,
+                                2,
+                                {
+                                    "GitHub Light"
+                                }
+                            },
+                            {
+                                54,
+                                2,
+                                {
+                                    "GitHub Dark Colorblind"
                                 }
                             }
                         }
                     },
                     {
-                        3,
+                        5,
                         1,
                         {
                             "Components"
                         },
                         {
                             {
-                                7,
-                                2,
-                                {
-                                    "Element"
-                                }
-                            },
-                            {
-                                6,
-                                2,
-                                {
-                                    "Dialog"
-                                }
-                            },
-                            {
-                                11,
-                                2,
-                                {
-                                    "Textbox"
-                                }
-                            },
-                            {
-                                13,
-                                2,
-                                {
-                                    "Window"
-                                }
-                            },
-                            {
-                                9,
-                                2,
-                                {
-                                    "Section"
-                                }
-                            },
-                            {
-                                10,
+                                12,
                                 2,
                                 {
                                     "Tab"
                                 }
                             },
                             {
-                                8,
+                                9,
                                 2,
                                 {
-                                    "Notification"
+                                    "Element"
                                 }
                             },
                             {
-                                4,
+                                15,
                                 2,
                                 {
-                                    "Assets"
+                                    "Window"
                                 }
                             },
                             {
-                                12,
+                                14,
                                 2,
                                 {
                                     "TitleBar"
                                 }
                             },
                             {
-                                5,
+                                13,
+                                2,
+                                {
+                                    "Textbox"
+                                }
+                            },
+                            {
+                                6,
+                                2,
+                                {
+                                    "Assets"
+                                }
+                            },
+                            {
+                                7,
                                 2,
                                 {
                                     "Button"
+                                }
+                            },
+                            {
+                                11,
+                                2,
+                                {
+                                    "Section"
+                                }
+                            },
+                            {
+                                8,
+                                2,
+                                {
+                                    "Dialog"
+                                }
+                            },
+                            {
+                                10,
+                                2,
+                                {
+                                    "Notification"
+                                }
+                            }
+                        }
+                    },
+                    {
+                        27,
+                        2,
+                        {
+                            "init"
+                        }
+                    },
+                    {
+                        3,
+                        1,
+                        {
+                            "App"
+                        },
+                        {
+                            {
+                                4,
+                                2,
+                                {
+                                    "init"
                                 }
                             }
                         }
@@ -61956,92 +62175,93 @@ local ObjectTree = {
 -- Line offsets for debugging (only included when minifyTables is false)
 local LineOffsets = {
     [4] = 8,
-    [5] = 16,
-    [6] = 95,
-    [7] = 263,
-    [8] = 412,
-    [9] = 634,
-    [10] = 688,
-    [11] = 903,
-    [12] = 1026,
-    [13] = 1268,
-    [15] = 1771,
-    [16] = 1814,
-    [17] = 2391,
-    [18] = 2986,
-    [19] = 2995,
-    [20] = 3100,
-    [21] = 3493,
-    [22] = 3718,
-    [23] = 3796,
-    [24] = 3978,
-    [25] = 4322,
-    [28] = 4748,
-    [29] = 4866,
-    [30] = 4988,
-    [31] = 5015,
-    [32] = 5068,
-    [33] = 5085,
-    [34] = 5315,
-    [36] = 58501,
-    [37] = 58548,
-    [38] = 58595,
-    [39] = 58642,
-    [40] = 58689,
-    [41] = 58737,
-    [42] = 58785,
-    [43] = 58832,
-    [44] = 58879,
-    [45] = 58927,
-    [46] = 58958,
-    [47] = 59005,
-    [48] = 59052,
-    [49] = 59099,
-    [50] = 59146,
-    [51] = 59193,
-    [52] = 59240,
-    [53] = 59287,
-    [54] = 59334,
-    [55] = 59381,
-    [56] = 59430,
-    [57] = 59477,
-    [58] = 59524,
-    [59] = 59572,
-    [60] = 59619,
-    [61] = 59666,
-    [62] = 59742,
-    [63] = 59789,
-    [64] = 59837,
-    [65] = 59884,
-    [66] = 59931,
-    [67] = 59978,
-    [68] = 60025,
-    [69] = 60072,
-    [70] = 60120,
-    [71] = 60167,
-    [72] = 60214,
-    [73] = 60261,
-    [74] = 60308,
-    [75] = 60355,
-    [76] = 60402,
-    [77] = 60449,
-    [78] = 60496,
-    [79] = 60543,
-    [80] = 60590,
-    [81] = 60637,
-    [82] = 60684,
-    [83] = 60731,
-    [84] = 60778,
-    [85] = 60825,
-    [86] = 60872,
-    [87] = 60919,
-    [88] = 60966,
-    [89] = 61013,
-    [90] = 61060,
-    [91] = 61107,
-    [92] = 61154,
-    [93] = 61184,
-    [94] = 61231
+    [6] = 209,
+    [7] = 217,
+    [8] = 296,
+    [9] = 464,
+    [10] = 613,
+    [11] = 835,
+    [12] = 889,
+    [13] = 1104,
+    [14] = 1227,
+    [15] = 1469,
+    [17] = 1972,
+    [18] = 2015,
+    [19] = 2592,
+    [20] = 3187,
+    [21] = 3196,
+    [22] = 3301,
+    [23] = 3694,
+    [24] = 3919,
+    [25] = 3997,
+    [26] = 4179,
+    [27] = 4523,
+    [30] = 4951,
+    [31] = 5069,
+    [32] = 5191,
+    [33] = 5218,
+    [34] = 5271,
+    [35] = 5288,
+    [36] = 5518,
+    [38] = 58704,
+    [39] = 58751,
+    [40] = 58798,
+    [41] = 58845,
+    [42] = 58892,
+    [43] = 58940,
+    [44] = 58988,
+    [45] = 59035,
+    [46] = 59082,
+    [47] = 59130,
+    [48] = 59161,
+    [49] = 59208,
+    [50] = 59255,
+    [51] = 59302,
+    [52] = 59349,
+    [53] = 59396,
+    [54] = 59443,
+    [55] = 59490,
+    [56] = 59537,
+    [57] = 59584,
+    [58] = 59633,
+    [59] = 59680,
+    [60] = 59727,
+    [61] = 59775,
+    [62] = 59822,
+    [63] = 59869,
+    [64] = 59945,
+    [65] = 59992,
+    [66] = 60040,
+    [67] = 60087,
+    [68] = 60134,
+    [69] = 60181,
+    [70] = 60228,
+    [71] = 60275,
+    [72] = 60323,
+    [73] = 60370,
+    [74] = 60417,
+    [75] = 60464,
+    [76] = 60511,
+    [77] = 60558,
+    [78] = 60605,
+    [79] = 60652,
+    [80] = 60699,
+    [81] = 60746,
+    [82] = 60793,
+    [83] = 60840,
+    [84] = 60887,
+    [85] = 60934,
+    [86] = 60981,
+    [87] = 61028,
+    [88] = 61075,
+    [89] = 61122,
+    [90] = 61169,
+    [91] = 61216,
+    [92] = 61263,
+    [93] = 61310,
+    [94] = 61357,
+    [95] = 61387,
+    [96] = 61434
 }
 
 -- Misc AOT variable imports
@@ -62541,3 +62761,5 @@ end
 for _, ScriptRef in next, ScriptsToRun do
     Defer(LoadScript, ScriptRef)
 end
+
+return LoadScript(RealObjectRoot.Src.init)
