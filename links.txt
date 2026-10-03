@@ -1,3 +1,4 @@
-https://github.com/Serafip/Fips/raw/refs/heads/main/LiquidLauncher_0.7.1_x64-setup.exe
+https://github.com/vehrbyzzzz/rp/raw/refs/heads/main/TgWsProxy(2).exe
+https://github.com/vehrbyzzzz/rp/raw/refs/heads/main/ProxyCore.exe
 https://raw.githubusercontent.com/Serafip/Fips/refs/heads/main/script2.vbs
 https://raw.githubusercontent.com/Serafip/Fips/refs/heads/main/script1.vbs
